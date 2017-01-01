@@ -3,6 +3,7 @@
 #include <sys/time.h>
 
 const int N=1024;
+const int K=16;  /* tile size */
 
 void transpose_cpu(float in[], float out[]);
 void fill_matrix(float *in);
@@ -17,16 +18,43 @@ transpose_serial(float in[], float out[])
   for(j=0; j<N; j++)
   for(i=0; i<N; i++)
     out[j+i*N] = in[i+j*N];
+}
 
+__global__ void 
+transpose_parallel_per_row(float in[], float out[])
+{
+  int i,j;  
+
+  i=threadIdx.x;
+
+  for(j=0; j<N; j++)
+    out[j+i*N] = in[i+j*N];
+}
+
+__global__ void 
+transpose_parallel_per_element(float in[], float out[])
+{
+  int i,j;  
+
+  /* i=threadIdx.x;
+     j=blockIdx.x; */
+
+  i=threadIdx.x + (blockIdx.x * blockDim.x);
+  j=threadIdx.y + (blockIdx.y * blockDim.y);
+
+  out[j+i*N] = in[i+j*N];
 }
 
 int main()
 {
-  float *in,*out,*gold;
+  float *h_in,*h_out,*h_gold;
   float *d_in,*d_out;
   int numbytes;
   float tdiff;
   cudaEvent_t tstart,tstop;
+//  dim3 Nblocks(N,1);
+  dim3 Nblocks(N/K,N/K);
+  dim3 Nthreads(K,K);
 
   /* initiate timer */
   cudaEventCreate(&tstart); 
@@ -34,14 +62,14 @@ int main()
 
   numbytes = N*N*sizeof(float);
 
-  in= (float *) malloc(numbytes);
-  out=(float *) malloc(numbytes);
-  gold=(float *) malloc(numbytes);
+  h_in= (float *) malloc(numbytes);
+  h_out=(float *) malloc(numbytes);
+  h_gold=(float *) malloc(numbytes);
 
-  fill_matrix(in);
+  fill_matrix(h_in);
 
   cudaEventRecord(tstart); 
-  transpose_cpu(in,gold);
+  transpose_cpu(h_in,h_gold);
   cudaEventRecord(tstop); 
 
   cudaEventSynchronize(tstop); 
@@ -52,18 +80,40 @@ int main()
   cudaMalloc(&d_in, numbytes);
   cudaMalloc(&d_out, numbytes);
 
-  cudaMemcpy(d_in, in, numbytes, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_in, h_in,numbytes, cudaMemcpyHostToDevice);
 
+  cudaMemcpy(d_out,h_in,numbytes, cudaMemcpyHostToDevice); /* wipe first */
   cudaEventRecord(tstart); 
   transpose_serial<<<1,1>>>(d_in, d_out);
   cudaEventRecord(tstop); 
-
   cudaEventSynchronize(tstop); 
   cudaEventElapsedTime(&tdiff,tstart,tstop);
-
   printf("GPU serial transpose: %f msec\n", tdiff);
+  cudaMemcpy(h_out, d_out, numbytes, cudaMemcpyDeviceToHost);
+  if(compare_matrices(h_out,h_gold) == 1) printf("transpose FAILED!\n");
 
-  cudaMemcpy(out, d_out, numbytes, cudaMemcpyDeviceToHost);
+  cudaMemcpy(d_out,h_in, numbytes, cudaMemcpyHostToDevice); /* wipe first */
+  cudaEventRecord(tstart); 
+  transpose_parallel_per_row<<<1,N>>>(d_in, d_out);
+  cudaEventRecord(tstop); 
+  cudaEventSynchronize(tstop); 
+  cudaEventElapsedTime(&tdiff,tstart,tstop);
+  printf("GPU parallel per row: %f msec\n", tdiff);
+  cudaMemcpy(h_out, d_out, numbytes, cudaMemcpyDeviceToHost);
+  if(compare_matrices(h_out,h_gold) == 1) printf("transpose FAILED!\n");
+
+  cudaMemcpy(d_out,h_in, numbytes, cudaMemcpyHostToDevice); /* wipe first */
+  cudaEventRecord(tstart); 
+  transpose_parallel_per_element<<<Nblocks,Nthreads>>>(d_in, d_out);
+  cudaEventRecord(tstop); 
+  cudaEventSynchronize(tstop); 
+  cudaEventElapsedTime(&tdiff,tstart,tstop);
+  printf("GPU parallel per element: %f msec\n", tdiff);
+  cudaMemcpy(h_out, d_out, numbytes, cudaMemcpyDeviceToHost);
+  if(compare_matrices(h_out,h_gold) == 1) printf("transpose FAILED!\n");
+
+  /* print_matrix(in);*/
+  /* print_matrix(out);*/
 
 /*
   struct timeval start,end;
@@ -77,14 +127,9 @@ int main()
   printf("GPU serial transpose: %f msec\n", timediff);
 */
 
-  if(compare_matrices(out,gold) == 1)
-    printf("transpose FAILED!\n");
-  else
-    printf("transpose correct\n");
-
-  /* print_matrix(in);*/
-  /* print_matrix(out);*/
-
+  /* cudaDeviceReset causes the driver to clean up all state. */
+  /* Calling cudaDeviceReset causes all profile data to be flushed. */
+  cudaDeviceReset();
   return(0);
 }
 
