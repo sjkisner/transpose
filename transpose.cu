@@ -45,6 +45,37 @@ transpose_parallel_per_element(float in[], float out[])
   out[j+i*N] = in[i+j*N];
 }
 
+__global__ void 
+transpose_parallel_per_element_tiled(float in[], float out[])
+{
+  int i,j,ii,jj;  
+  __shared__ float sh_arr[K*K];
+
+  i=threadIdx.x + (blockIdx.x * blockDim.x);
+  j=threadIdx.y + (blockIdx.y * blockDim.y);
+
+  ii=threadIdx.x;
+  jj=threadIdx.y;
+
+  /* copy+transpose current block into a tile of shared memory */
+  /* read from global memory is coalesced (threadIdx.x is fast variable */
+  sh_arr[jj+ii*K] = in[i+j*N];
+
+  /* going to copy this to tile in output global array, so need to 
+     complete the read+transpose */
+  __syncthreads();
+
+  /* offsets for global memory swapped here because output tile location
+     is transposed position wrt input */
+  /* now write to global memory is also coalesced */
+  i=threadIdx.x + (blockIdx.y * blockDim.y);
+  j=threadIdx.y + (blockIdx.x * blockDim.x);
+
+  out[i+j*N] = sh_arr[ii+jj*K];
+
+}
+
+
 int main()
 {
   float *h_in,*h_out,*h_gold;
@@ -82,6 +113,8 @@ int main()
 
   cudaMemcpy(d_in, h_in,numbytes, cudaMemcpyHostToDevice);
 
+if(0)
+{
   cudaMemcpy(d_out,h_in,numbytes, cudaMemcpyHostToDevice); /* wipe first */
   cudaEventRecord(tstart); 
   transpose_serial<<<1,1>>>(d_in, d_out);
@@ -91,6 +124,7 @@ int main()
   printf("GPU serial transpose: %f msec\n", tdiff);
   cudaMemcpy(h_out, d_out, numbytes, cudaMemcpyDeviceToHost);
   if(compare_matrices(h_out,h_gold) == 1) printf("transpose FAILED!\n");
+}
 
   cudaMemcpy(d_out,h_in, numbytes, cudaMemcpyHostToDevice); /* wipe first */
   cudaEventRecord(tstart); 
@@ -109,6 +143,16 @@ int main()
   cudaEventSynchronize(tstop); 
   cudaEventElapsedTime(&tdiff,tstart,tstop);
   printf("GPU parallel per element: %f msec\n", tdiff);
+  cudaMemcpy(h_out, d_out, numbytes, cudaMemcpyDeviceToHost);
+  if(compare_matrices(h_out,h_gold) == 1) printf("transpose FAILED!\n");
+
+  cudaMemcpy(d_out,h_in, numbytes, cudaMemcpyHostToDevice); /* wipe first */
+  cudaEventRecord(tstart); 
+  transpose_parallel_per_element_tiled<<<Nblocks,Nthreads>>>(d_in, d_out);
+  cudaEventRecord(tstop); 
+  cudaEventSynchronize(tstop); 
+  cudaEventElapsedTime(&tdiff,tstart,tstop);
+  printf("GPU parallel per element tiled: %f msec\n", tdiff);
   cudaMemcpy(h_out, d_out, numbytes, cudaMemcpyDeviceToHost);
   if(compare_matrices(h_out,h_gold) == 1) printf("transpose FAILED!\n");
 
